@@ -58,9 +58,11 @@ make install-dev
 To ensure software stability in high-stakes engineering environments, we enforce strict continuous integration and deployment.
 
 ### PR Requirements
-1. **Branch Naming**: ```Bash
-                       feature/ewc-[ticket-number]
-                      ```,
+1. **Branch Naming**:
+ ```Bash
+feature/ewc-[ticket-number]
+``` 
+,
 ```Bash
 fix/ewc-[ticket-number], or docs/update.
 ```
