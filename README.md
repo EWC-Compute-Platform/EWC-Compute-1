@@ -19,13 +19,13 @@ The industrial engineering landscape is shifting from slow, siloed desktop workf
 Our GitHub Organization tracks our modular microservices and third-party upstream forks. Here is how the EWC ecosystem is organized:
 
 ### 🌟 Core Repositories
-. ewc-compute-platform-1 (This Repo): The central hub containing platform specifications, architectural decision records (ADRs), and unified deployment scripts.
+* ewc-compute-platform-1 (This Repo): The central hub containing platform specifications, architectural decision records (ADRs), and unified deployment scripts.
 
-. ewc-ui-dashboards: Modern Next.js/React web app for user authentication, telemetry monitoring, and secure enterprise logins.
+* ewc-ui-dashboards: Modern Next.js/React web app for user authentication, telemetry monitoring, and secure enterprise logins.
 
-. ewc-physical-ai: Python-driven backend microservices hosting our LLMs, vector DBs (RAG), and agentic toolkits for engineering chat.
+* ewc-physical-ai: Python-driven backend microservices hosting our LLMs, vector DBs (RAG), and agentic toolkits for engineering chat.
 
-. ewc-compute-templates: Curated Dockerfiles and Terraform scripts containerizing OpenFOAM, structural FEM, and custom solvers.
+* ewc-compute-templates: Curated Dockerfiles and Terraform scripts containerizing OpenFOAM, structural FEM, and custom solvers.
 
 ### 🍴 Forked & Tracked Upstreams
 We maintain curated forks of open-source solvers, benchmarking how they perform when accelerated by NVIDIA CUDA libraries.
