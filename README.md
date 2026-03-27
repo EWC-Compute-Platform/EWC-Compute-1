@@ -32,4 +32,11 @@ We maintain curated forks of open-source solvers, benchmarking how they perform 
 
 Check our organization page to see our active forks and tracked dependencies!
 
+### 🛠️ Platform Features
+**Feature**       **Description**                                                                          **Target Sector**
+**Request a Twin**   Instantly spin up a parametric CAD environment visualizer.                            Automotive & Manufacturing
+**Compute Templates**   Select a pre-configured JSON/YAML profile to run solvers on remote GPU nodes.       Aerospace, Semiconductor
+**Telemetry & Telecontrol**  Real-time monitoring of job convergence, residuals, and hardware resource usage.    HPC & Cloud Ops
+**PhysicalAI Query**       Natural Language prompt querying of internal documentation and design rule checks.    Systems Engineering
+
 
