@@ -1,0 +1,68 @@
+# EWC Compute Platform — Phase 2 Dependency Additions
+# =====================================================
+# This file documents the additional dependencies that become ACTIVE in Phase 2.
+# They are already locked in requirements.txt (physicsnemo, warp-lang) or are
+# solver SDK dependencies installed separately (COMSOL, Lumerical).
+#
+# HOW TO USE:
+#   When Phase 2 begins, run:
+#     pip install -r requirements-phase2.txt
+#   Then remove the late-import guards for physicsnemo in surrogate_router.py
+#   and update the phase_active flag in app/core/config.py.
+#
+# Solver SDKs (COMSOL, Lumerical, Ansys) are NOT pip-installable.
+# See docs/engineering/solver-setup.md for installation instructions per environment.
+# =====================================================
+
+# ── Already locked in requirements.txt — activate late-import guards ──
+# physicsnemo        ← remove late-import guard in ai_physics/physicsnemo_client.py
+# (warp-lang remains dormant until Phase 3)
+
+# ── New PyPI additions for Phase 2 ───────────────────────────────────────
+
+# CUDA-X Python bindings — available via NVIDIA NGC / pip where applicable
+# cuDSS and AmgX are C++ libraries; Python bindings via solver SDKs (COMSOL/Ansys).
+# The cuda_x_router.py selects the solver; the solver adapter handles the actual call.
+# No direct pip install needed for cuDSS/AmgX — they run inside COMSOL/Ansys.
+
+# Async file handling for CAD ingestion pipeline (STEP/IGES/DXF upload)
+aiofiles==24.1.0                    # Async file I/O for CAD file upload handler
+
+# CAD parsing — lightweight geometry pre-validation before solver dispatch
+cadquery==2.5.2                     # CAD kernel (OCC-based) for STEP/IGES parsing
+                                    # Alternative: pythonocc-core if cadquery too heavy
+
+# Mesh inspection (for behavioural twin validation)
+trimesh==4.5.3                      # Mesh loading, repair, and inspection
+numpy==2.1.3                        # Numeric array ops (PhysicsNeMo input preparation)
+scipy==1.14.1                       # Scientific computing (surrogate post-processing)
+
+# ── Phase 2 test additions ────────────────────────────────────────────────
+# Add to requirements-dev.txt when Phase 2 begins:
+#
+# pytest-benchmark==5.1.0          # Solver adapter performance benchmarking
+# responses==0.25.3                # HTTP mock for COMSOL/Lumerical REST API tests
+
+# ── Solver SDK installation notes ────────────────────────────────────────
+#
+# COMSOL Multiphysics (LiveLink for Python / REST API):
+#   - Requires COMSOL licence + server installation
+#   - Python client: install from COMSOL installation dir
+#     pip install <COMSOL_INSTALL>/plugins/com.comsol.connect.python/comsol_api-*.whl
+#   - REST API: available at http://localhost:2036 when COMSOL server is running
+#   - See: docs/engineering/solver-setup.md#comsol
+#
+# Lumerical (Ansys Python API):
+#   - Requires Lumerical FDTD/MODE licence + installation
+#   - Python client: pip install from Lumerical installation dir
+#   - lumapi available at <LUMERICAL_INSTALL>/api/python/
+#   - See: docs/engineering/solver-setup.md#lumerical
+#
+# Ansys Fluent (PyFluent — pip installable):
+#   pip install ansys-fluent-core       # Phase 2–3
+#   pip install ansys-fluent-visualization
+#   Requires Ansys licence + Fluent installation; PyFluent connects via gRPC
+#
+# Ansys LS-DYNA (PyDYNA — pip installable):
+#   pip install ansys-dyna-core         # Phase 3
+#   Requires Ansys LS-DYNA licence
