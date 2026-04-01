@@ -1,0 +1,37 @@
+# EWC Compute Platform — Backend Development & Test Dependencies
+# ==============================================================
+# Install with: pip install -r requirements.txt -r requirements-dev.txt
+# All production dependencies are inherited from requirements.txt
+# ==============================================================
+
+-r requirements.txt
+
+# ── Testing ──────────────────────────────────────────────────────────────
+pytest==8.3.4                       # Test runner
+pytest-asyncio==0.24.0              # Async test support (FastAPI + motor)
+pytest-cov==6.0.0                   # Coverage reporting — enforces ≥ 80% gate in CI
+pytest-mock==3.14.0                 # Mock fixtures
+httpx==0.28.1                       # Async test client for FastAPI (via TestClient)
+asgi-lifespan==2.1.0                # ASGI lifespan management in tests
+mongomock-motor==0.0.34             # In-memory MongoDB for unit tests (no Atlas needed)
+fakeredis==2.26.2                   # In-memory Redis for Celery unit tests
+freezegun==1.5.1                    # Deterministic datetime in tests
+
+# ── Linting & formatting ──────────────────────────────────────────────────
+ruff==0.8.4                         # Lint + format (replaces flake8, isort, black)
+mypy==1.14.0                        # Static type checking — --strict mode in CI
+
+# ── Mypy type stubs ───────────────────────────────────────────────────────
+types-passlib==1.7.7.20240819
+types-redis==4.6.0.20241004
+types-python-jose==3.3.4.20240106
+
+# ── Security scanning (run locally; also in CI via security-scan.yml) ─────
+bandit[toml]==1.8.0                 # Python SAST — mirrors CI security gate
+safety==3.2.11                      # Dependency CVE scan — mirrors CI security gate
+
+# ── USD development tools ─────────────────────────────────────────────────
+# usd-core already in requirements.txt; no additional test deps needed
+
+# ── Documentation ─────────────────────────────────────────────────────────
+mkdocs-material==9.5.47             # Optional: local docs preview
