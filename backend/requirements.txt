@@ -1,0 +1,73 @@
+# EWC Compute Platform — Backend Production Dependencies
+# =======================================================
+# Phase annotations mark when each dependency becomes ACTIVE in the platform.
+# All dependencies are installed from Phase 0; phase-guarded imports (see
+# CONTRIBUTING.md) ensure dormant libraries do not run at startup until needed.
+#
+# Pin strategy:
+#   - Core Phase 0 libraries: pinned to tested minor version
+#   - NVIDIA CAE libraries:  pinned where stable release exists; "latest stable"
+#     via unpinned entry otherwise — version bumps require an issue + PR
+#   - Solver SDK libraries (COMSOL, Lumerical): installed separately per environment;
+#     not pip-installable — documented in docs/engineering/solver-setup.md
+# =======================================================
+
+# ── Web framework ─────────────────────────── Phase 0 ──
+fastapi[standard]==0.115.6          # Async, auto OpenAPI docs; [standard] includes uvicorn + httpx
+uvicorn[standard]==0.32.1           # ASGI server with websocket support (KPI live updates, Phase 4)
+pydantic==2.10.3                    # Schema validation — strict mode enforced throughout
+pydantic-settings==2.7.0            # Settings from .env; used in app/core/config.py
+python-multipart==0.0.20            # Form / file upload (CAD file ingestion)
+
+# ── Authentication & security ─────────────── Phase 0 ──
+python-jose[cryptography]==3.3.0    # JWT creation and validation
+passlib[bcrypt]==1.7.4              # Password hashing
+cryptography==43.0.3                # Cryptographic primitives (pinned for CVE stability)
+
+# ── Database ──────────────────────────────── Phase 0 ──
+motor==3.6.0                        # Async MongoDB driver (wraps pymongo for async FastAPI)
+pymongo==4.9.2                      # Sync MongoDB driver (migrations, seeding scripts)
+beanie==1.27.0                      # ODM on top of motor; Pydantic v2 native
+
+# ── Job queue ─────────────────────────────── Phase 0 ──
+redis==5.2.1                        # Redis client (connection pool, health checks)
+celery[redis]==5.4.0                # Async task queue for simulation dispatch
+
+# ── Observability ─────────────────────────── Phase 0 ──
+opentelemetry-api==1.29.0
+opentelemetry-sdk==1.29.0
+opentelemetry-exporter-otlp==1.29.0
+opentelemetry-instrumentation-fastapi==0.50b0
+opentelemetry-instrumentation-motor==0.50b0
+structlog==24.4.0                   # Structured JSON logging
+
+# ── HTTP client ───────────────────────────── Phase 0 ──
+httpx==0.28.1                       # Async HTTP — used by NIM client, solver adapters
+
+# ── NVIDIA OpenUSD ────────────────────────── Phase 0 (ACTIVE) ──
+usd-core==25.08                     # OpenUSD Python bindings — twin export/import
+                                    # from pxr import Usd, UsdGeom, UsdPhysics
+
+# ── NVIDIA PhysicsNeMo ────────────────────── Phase 2–3 (LOCKED, dormant) ──
+physicsnemo                         # AI physics framework — cWGAN-GP + PINNs
+                                    # Late-import guard: import inside function body only
+                                    # Active from Phase 2; see CONTRIBUTING.md §Phase-aware development
+
+# ── NVIDIA Warp ───────────────────────────── Phase 3 (LOCKED, dormant) ──
+warp-lang                           # GPU simulation kernels
+                                    # Late-import guard: import inside function body only
+                                    # Active from Phase 3
+
+# ── AI / NIM inference ────────────────────── Phase 1 (LOCKED, dormant) ──
+openai==1.59.6                      # NIM uses OpenAI-compatible API — no other client needed
+                                    # Active from Phase 1; NIM_API_KEY required in .env
+
+# ── DSR-CRAG / RAG pipeline ───────────────── Phase 1 (LOCKED, dormant) ──
+langchain==0.3.14                   # RAG orchestration layer for DSR-CRAG pipeline
+langchain-community==0.3.14         # Community integrations (MongoDB vector store)
+langchain-openai==0.2.14            # LangChain ↔ OpenAI-compatible endpoint (NIM)
+
+# ── Utilities ────────────────────────────────────────────────────────────
+python-dotenv==1.0.1                # .env loading (redundant with pydantic-settings but useful in scripts)
+tenacity==9.0.0                     # Retry logic for solver API calls and NIM requests
+anyio==4.7.0                        # Async compatibility (FastAPI / Celery interop)
