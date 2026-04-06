@@ -20,7 +20,7 @@ pydantic-settings==2.7.0            # Settings from .env; used in app/core/confi
 python-multipart==0.0.20            # Form / file upload (CAD file ingestion)
 
 # ── Authentication & security ─────────────── Phase 0 ──
-python-jose[cryptography]==3.3.0    # JWT creation and validation
+python-jose[cryptography]==3.4.0    # JWT creation and validation
 passlib[bcrypt]==1.7.4              # Password hashing
 cryptography==43.0.3                # Cryptographic primitives (pinned for CVE stability)
 
