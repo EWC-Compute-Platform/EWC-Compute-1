@@ -20,10 +20,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import auth, health, projects, twins
 from app.core.config import settings
+from app.core.cache import close_redis, init_redis
 from app.core.database import close_db, init_db
 from app.core.logging import configure_logging
 from app.core.middleware import AuditLogMiddleware, RequestTracingMiddleware
-from app.core.telemetry
+from app.core.telemetry import configure_telemetry
 
 logger = structlog.get_logger(__name__)
 
@@ -32,7 +33,7 @@ logger = structlog.get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application startup and shutdown."""
     configure_logging()
-    app.core.telemetry.configure_telemetry()
+    configure_telemetry()
 
     logger.info(
         "ewc_compute.startup",
@@ -43,9 +44,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await init_db()
     logger.info("ewc_compute.db.connected", db=settings.MONGODB_DB_NAME)
 
+    await init_redis()
+    logger.info("ewc_compute.cache.connected", url=settings.REDIS_URL)
+
     yield
 
     await close_db()
+    await close_redis()
     logger.info("ewc_compute.shutdown")
 
 
