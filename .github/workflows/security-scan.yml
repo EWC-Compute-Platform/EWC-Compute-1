@@ -1,0 +1,80 @@
+name: Security Scan
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main", "develop"]
+  schedule:
+    - cron: "0 3 * * 1"   # Weekly Monday 03:00 UTC
+
+jobs:
+  sast-python:
+    name: Bandit — Python SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Bandit
+        run: pip install bandit[toml]
+      - name: Run Bandit
+        run: bandit -r backend/app -ll -x backend/tests
+        # -ll = report only MEDIUM and HIGH severity
+
+  dependency-cve:
+    name: Safety — Dependency CVE Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Safety
+        run: pip install safety
+      - name: Scan backend dependencies
+        working-directory: backend
+        run: safety check -r requirements.txt --full-report
+
+  secrets-detection:
+    name: Gitleaks — Secret Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  container-scan:
+    name: Trivy — Container Image Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -t ewc-backend:scan ./backend
+
+      - name: Scan backend image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ewc-backend:scan
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
+
+      - name: Build frontend image
+        run: docker build -t ewc-frontend:scan ./frontend
+
+      - name: Scan frontend image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ewc-frontend:scan
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
