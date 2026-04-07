@@ -24,7 +24,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      
+
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -34,7 +34,6 @@ jobs:
 
       - name: Install dependencies
         working-directory: backend
-        #continue-on-error: true
         run: |
           pip install --upgrade pip
           pip install -r requirements-dev.txt
