@@ -1,0 +1,6 @@
+[allowlist]
+  description = "Allowlist for example/placeholder values"
+  paths = [
+    ".env.example"
+  ]
+  
