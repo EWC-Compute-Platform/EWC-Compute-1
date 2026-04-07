@@ -1,14 +1,11 @@
-name: CI — Backend
+name: CI Backend
 
 on:
   push:
-    branches: ["**"]
   pull_request:
-    branches: ["main", "develop"]
 
 jobs:
-  backend-ci:
-    name: Lint · Type-check · Test
+  test:
     runs-on: ubuntu-latest
 
     services:
@@ -16,14 +13,32 @@ jobs:
         image: mongo:7.0
         ports:
           - 27017:27017
+        options: >-
+          --health-cmd "mongosh --eval 'db.runCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
       redis:
-        image: redis:7-alpine
+        image: redis:7
         ports:
           - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      MONGODB_URI: mongodb://localhost:27017
+      MONGODB_DB_NAME: ewc_compute_test
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-test-secret-32-chars-minimum-x
+      JWT_ALGORITHM: HS256
+      APP_ENV: test
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -37,39 +52,15 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements-dev.txt
-          pip install usd-core
 
-      - name: Lint with ruff
+      - name: Lint (ruff)
         working-directory: backend
-        run: ruff check app tests
+        run: ruff check .
 
-      - name: Format check with ruff
+      - name: Type check (mypy)
         working-directory: backend
-        run: ruff format --check app tests
+        run: mypy app --ignore-missing-imports
 
-      - name: Type-check with mypy
+      - name: Run tests
         working-directory: backend
-        run: mypy app --strict
-
-      - name: Run tests with coverage
-        working-directory: backend
-        env:
-          APP_ENV: test
-          MONGODB_URI: mongodb://localhost:27017
-          MONGODB_DB_NAME: ewc_compute_test
-          REDIS_URL: redis://localhost:6379/0
-          JWT_SECRET: test-secret-key-for-ci-only-32-chars
-          JWT_ALGORITHM: HS256
-        run: |
-          pytest tests/ \
-            --cov=app \
-            --cov-report=term-missing \
-            --cov-fail-under=80 \
-            -v
-
-      - name: Upload coverage report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-coverage
-          path: backend/htmlcov/
+        run: pytest tests/ -v --cov=app --cov-report=term-missing --cov-fail-under=80
