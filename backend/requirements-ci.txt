@@ -1,0 +1,73 @@
+# EWC Compute — CI-only requirements
+# ====================================
+# Excludes dormant Phase 2–3 NVIDIA packages (physicsnemo, warp-lang, flow360, tidy3d)
+# to keep CI fast and prevent runner OOM.
+# These packages are in requirements.txt with phase guards — they are not needed
+# to run Phase 0 tests.
+#
+# Use: pip install -r requirements-ci.txt
+# CI workflow: ci-backend.yml
+
+# ── Web framework ─────────────────────────────────────────────────────────
+fastapi[standard]==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+pydantic-settings==2.7.0
+python-multipart==0.0.20
+
+# ── Auth / security ───────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+cryptography==43.0.3
+
+# ── Database ──────────────────────────────────────────────────────────────
+motor==3.6.0
+pymongo==4.9.2
+beanie==1.27.0
+
+# ── Job queue ─────────────────────────────────────────────────────────────
+redis==5.2.1
+celery[redis]==5.4.0
+
+# ── Observability ─────────────────────────────────────────────────────────
+opentelemetry-api==1.29.0
+opentelemetry-sdk==1.29.0
+opentelemetry-exporter-otlp==1.29.0
+opentelemetry-instrumentation-fastapi==0.50b0
+opentelemetry-instrumentation-motor==0.50b0
+structlog==24.4.0
+
+# ── HTTP client ───────────────────────────────────────────────────────────
+httpx==0.28.1
+
+# ── OpenUSD ── Phase 0 active — small enough for CI ──────────────────────
+usd-core==25.08
+
+# ── AI / NIM (OpenAI-compatible client only — no heavy models) ───────────
+openai==1.59.6
+
+# ── RAG pipeline ─────────────────────────────────────────────────────────
+langchain==0.3.14
+langchain-community==0.3.14
+langchain-openai==0.2.14
+
+# ── Utilities ─────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+tenacity==9.0.0
+anyio==4.7.0
+
+# ── Dev / test ────────────────────────────────────────────────────────────
+pytest==8.3.4
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+pytest-mock==3.14.0
+asgi-lifespan==2.1.0
+mongomock-motor==0.0.34
+fakeredis==2.26.2
+freezegun==1.5.1
+ruff==0.8.4
+mypy==1.14.0
+types-passlib==1.7.7.20240819
+types-redis==4.6.0.20241004
+types-python-jose==3.3.4.20240106
+bandit[toml]==1.8.0
