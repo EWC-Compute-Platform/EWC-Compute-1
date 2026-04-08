@@ -6,6 +6,10 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'jsdom',
+    // inside defineConfig({...}), add:
+  test: {
+    environment: "node",
+    passWithNoTests: true,
   },
 })
 
