@@ -9,38 +9,41 @@ Architecture
 DSR-CRAG = Dual-State Corrective Retrieval-Augmented Generation
 
   State 1 — Primary retrieval
-    embed(query) → Atlas vector search → score chunks → if quality OK → proceed
+    embed(query) → Atlas vector search → score chunks
+    → if quality OK → proceed to generation
 
   State 2 — Corrective re-retrieval (triggered when State 1 quality is low)
     reformulate_query(query, low-quality chunks) → re-embed → second Atlas search
-    → merge and re-rank results → proceed
+    → merge and re-rank results → proceed to generation
 
   Generation
     format_context(chunks) → query(NIM) → validate_response(answer)
-    → attach_provenance(answer, chunks) → return AssistantResponse
+    → build_provenance(answer, chunks) → return AssistantResponse
 
 Corpus chunk document schema (MongoDB collection: ewc_engineering_corpus)
 ────────────────────────────────────────────────────────────────────────────────
 {
   "_id":             ObjectId,
-  "chunk_id":        str,           # UUID, stable identifier
-  "source":          str,           # e.g. "ASHRAE Handbook 2021, Chapter 3"
+  "chunk_id":        str,           # UUID — stable identifier across re-indexes
+  "source":          str,           # Full citation, e.g. "ASHRAE Handbook 2021, Ch.3"
   "title":           str,           # Document / section title
-  "domain":          str,           # cfd|fem|thermal|electromagnetic|eda|
-                                    # optical|materials|general
-  "chunk_text":      str,           # Raw text of this chunk
+  "domain":          str,           # cfd | fem | thermal | electromagnetic |
+                                    # eda | optical | materials | general
+  "chunk_text":      str,           # Raw text of this chunk (~512 tokens)
   "embedding":       [float],       # 1024-dim nv-embedqa-e5-v5 vector
   "page_number":     int | None,
-  "section":         str | None,    # Section heading within source
-  "confidence_tier": str,           # authoritative|reference|model_estimate
-  "created_at":      datetime,
-  "metadata":        dict           # Arbitrary extra fields (DOI, URL, etc.)
+  "section":         str | None,    # Section heading within source document
+  "confidence_tier": str,           # authoritative | reference | model_estimate
+  "created_at":      datetime (UTC),
+  "metadata":        dict           # Arbitrary extras: DOI, URL, standard number, etc.
 }
 
-Atlas vector search index name: ewc_engineering_corpus
-Vector field: embedding
-Dimensions: 1024
-Similarity: cosine
+Atlas vector search index:
+  name       : ewc_engineering_corpus   (settings.VECTOR_SEARCH_INDEX)
+  field      : embedding
+  dimensions : 1024
+  similarity : cosine
+  type       : knnVector
 ────────────────────────────────────────────────────────────────────────────────
 """
 
@@ -48,60 +51,46 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from openai import AsyncOpenAI
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.core.logging import get_logger
+from app.core.prompts import (
+    ACTIVE_PROMPT_VERSION,
+    ACTIVE_SYSTEM_PROMPT,
+)
 
-logger = get_logger(__name__)
-
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
 CORPUS_COLLECTION = "ewc_engineering_corpus"
-VECTOR_SEARCH_INDEX = settings.VECTOR_SEARCH_INDEX   # "ewc_engineering_corpus"
-EMBEDDING_DIMENSIONS = 1024                           # nv-embedqa-e5-v5
-TOP_K_PRIMARY = 8          # chunks retrieved in State 1
-TOP_K_CORRECTIVE = 6       # additional chunks retrieved in State 2
-RELEVANCE_THRESHOLD = 0.72 # cosine similarity floor; below → trigger State 2
-MIN_QUALITY_CHUNKS = 3     # minimum chunks above threshold to skip State 2
-MAX_CONTEXT_CHARS = 6000   # hard cap on context sent to NIM
+EMBEDDING_DIMENSIONS = 1024          # nv-embedqa-e5-v5 output dimension
+TOP_K_PRIMARY = 8                    # Chunks retrieved in State 1
+TOP_K_CORRECTIVE = 6                 # Additional chunks retrieved in State 2
+RELEVANCE_THRESHOLD = 0.72           # Cosine similarity floor; below → State 2
+MIN_QUALITY_CHUNKS = 3               # Min chunks above threshold to skip State 2
+MAX_CONTEXT_CHARS = 6_000            # Hard cap on context sent to NIM
 
-ENGINEERING_SYSTEM_PROMPT = """\
-You are the EWC Compute Physical AI Assistant — an engineering-domain copilot \
-grounded in a curated technical corpus. Your role is to give precise, \
-trustworthy answers to engineering and simulation questions.
-
-Rules you must always follow:
-1. Every specific numeric value, formula, or physical constant you state must \
-   be tagged with its provenance: either "retrieved from [source]" if it came \
-   from the retrieved context, or "model estimate — verify before use" if it \
-   did not.
-2. If the retrieved context does not contain enough information to answer \
-   confidently, say so explicitly. Never fabricate data.
-3. Keep answers concise and technically precise. Use SI units unless the \
-   context specifies otherwise.
-4. Do not suggest platform actions (running simulations, modifying twins, etc.) \
-   — those require explicit engineer confirmation through the confirmation gate.
-"""
-
-REFORMULATION_PROMPT = """\
-The following engineering query returned low-relevance retrieval results. \
-Reformulate it as a more specific, terminology-rich query that will retrieve \
-better corpus matches. Return only the reformulated query — no explanation.
-
-Original query: {query}
-Low-relevance snippets: {snippets}
-"""
+# NOTE: _REFORMULATION_PROMPT belongs in app.core.prompts alongside the system
+# prompt. It is defined here for Phase 1 and should be migrated to prompts.py
+# in the next prompt versioning PR (create REFORMULATION_PROMPT_V1 there).
+_REFORMULATION_PROMPT = (
+    "The following engineering query returned low-relevance retrieval results. "
+    "Reformulate it as a more specific, terminology-rich query that will retrieve "
+    "better corpus matches. Return only the reformulated query — no explanation.\n\n"
+    "Original query: {query}\n"
+    "Low-relevance snippets: {snippets}"
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,16 +106,16 @@ class CorpusChunk(BaseModel):
     chunk_text: str
     page_number: int | None = None
     section: str | None = None
-    confidence_tier: str = "reference"   # authoritative | reference | model_estimate
-    similarity_score: float = 0.0        # populated after vector search
+    confidence_tier: str = "reference"  # authoritative | reference | model_estimate
+    similarity_score: float = 0.0       # Populated after vector search
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProvenanceTag(BaseModel):
     """Provenance record attached to a specific claim in the response."""
-    claim_index: int          # Position of the claim in the response (0-based)
-    source: str               # e.g. "ASHRAE Handbook 2021, Chapter 3"
-    confidence: str           # high | moderate | low | model_estimate
+    claim_index: int            # Position of the claim in the response (0-based)
+    source: str                 # e.g. "ASHRAE Handbook 2021, Chapter 3"
+    confidence: str             # high | moderate | low | model_estimate
     chunk_id: str
     similarity_score: float
 
@@ -134,8 +123,9 @@ class ProvenanceTag(BaseModel):
 class AssistantRequest(BaseModel):
     """Incoming request to the assistant service."""
     query: str = Field(..., min_length=1, max_length=2000)
-    project_id: str | None = None    # Optional project scope for future filtering
-    domain_hint: str | None = None   # Optional domain hint (cfd|fem|thermal|…)
+    project_id: str | None = None       # Optional project scope for future filtering
+    domain_hint: str | None = None      # cfd | fem | thermal | electromagnetic |
+                                        # eda | optical | materials | general
     conversation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     turn_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
@@ -146,29 +136,33 @@ class AssistantResponse(BaseModel):
     turn_id: str
     answer: str
     provenance: list[ProvenanceTag]
-    retrieval_state: str          # "primary" | "corrective" | "fallback"
+    retrieval_state: str            # primary | corrective | fallback
     chunks_used: int
     model: str
+    prompt_version: str             # From app.core.prompts.ACTIVE_PROMPT_VERSION
     latency_ms: float
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
 
 
 class RetrievalResult(BaseModel):
     """Internal result from a single retrieval pass."""
     chunks: list[CorpusChunk]
     mean_similarity: float
-    quality_pass: bool   # True if mean_similarity >= RELEVANCE_THRESHOLD
+    quality_pass: bool  # True if mean_similarity >= RELEVANCE_THRESHOLD
+                        # AND at least MIN_QUALITY_CHUNKS chunks are above it
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NIM client (module-level singleton — shared across requests)
+# NIM client — module-level singleton, shared across requests
 # ─────────────────────────────────────────────────────────────────────────────
 
 _nim_client: AsyncOpenAI | None = None
 
 
 def _get_nim_client() -> AsyncOpenAI:
-    """Return (or lazily initialise) the NIM AsyncOpenAI client."""
+    """Return (or lazily initialise) the NIM AsyncOpenAI-compatible client."""
     global _nim_client
     if _nim_client is None:
         _nim_client = AsyncOpenAI(
@@ -180,7 +174,7 @@ def _get_nim_client() -> AsyncOpenAI:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 1 — Embed
+# Step 1 — embed()
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def embed(text: str) -> list[float]:
@@ -188,26 +182,32 @@ async def embed(text: str) -> list[float]:
     Embed a text string using NVIDIA NIM nv-embedqa-e5-v5.
 
     Returns a 1024-dimensional float vector.
-    Raises httpx.HTTPStatusError on NIM API failure.
+    The `input_type: "query"` parameter is required by NIM to distinguish
+    query vectors from passage vectors at retrieval time.
+
+    Raises:
+        ValueError: if the returned embedding has unexpected dimensions.
+        httpx.HTTPStatusError: on NIM API failure.
     """
     client = _get_nim_client()
     response = await client.embeddings.create(
         model=settings.NIM_EMBEDDING_MODEL,   # nvidia/nv-embedqa-e5-v5
         input=text,
         encoding_format="float",
-        extra_body={"input_type": "query"},   # NIM-specific: "query" vs "passage"
+        extra_body={"input_type": "query"},
     )
-    vector = response.data[0].embedding
+    vector: list[float] = response.data[0].embedding
     if len(vector) != EMBEDDING_DIMENSIONS:
         raise ValueError(
             f"Unexpected embedding dimension: got {len(vector)}, "
-            f"expected {EMBEDDING_DIMENSIONS}"
+            f"expected {EMBEDDING_DIMENSIONS}. "
+            f"Check NIM_EMBEDDING_MODEL in settings."
         )
     return vector
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 2 — Retrieve (Atlas vector search)
+# Step 2 — Vector search (Atlas)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _vector_search(
@@ -217,25 +217,25 @@ async def _vector_search(
     domain_filter: str | None = None,
 ) -> list[CorpusChunk]:
     """
-    Run a MongoDB Atlas vector search against the engineering corpus.
+    Run a MongoDB Atlas $vectorSearch against the engineering corpus.
 
-    Pipeline stages:
-      $vectorSearch → $project (add score) → optional $match (domain filter)
-
-    Atlas index configuration expected:
-      index name : ewc_engineering_corpus
-      field      : embedding
+    Expected Atlas index configuration:
+      index name : settings.VECTOR_SEARCH_INDEX  ("ewc_engineering_corpus")
+      path       : embedding
       dimensions : 1024
       similarity : cosine
       type       : knnVector
+
+    numCandidates is set to top_k × 10 to give Atlas enough candidates to
+    satisfy the domain filter without reducing effective recall.
     """
     pipeline: list[dict[str, Any]] = [
         {
             "$vectorSearch": {
-                "index": VECTOR_SEARCH_INDEX,
+                "index": settings.VECTOR_SEARCH_INDEX,
                 "path": "embedding",
                 "queryVector": query_vector,
-                "numCandidates": top_k * 10,   # over-fetch for filtering
+                "numCandidates": top_k * 10,
                 "limit": top_k,
             }
         },
@@ -258,11 +258,8 @@ async def _vector_search(
     if domain_filter:
         pipeline.append({"$match": {"domain": domain_filter}})
 
-    collection = db[CORPUS_COLLECTION]
-    cursor = collection.aggregate(pipeline)
-
     chunks: list[CorpusChunk] = []
-    async for doc in cursor:
+    async for doc in db[CORPUS_COLLECTION].aggregate(pipeline):
         doc.pop("_id", None)
         chunks.append(CorpusChunk(**doc))
 
@@ -273,9 +270,10 @@ def _score_retrieval(chunks: list[CorpusChunk]) -> RetrievalResult:
     """
     Evaluate the quality of a retrieval pass.
 
-    Quality passes when the mean cosine similarity of the top-k chunks
-    exceeds RELEVANCE_THRESHOLD AND at least MIN_QUALITY_CHUNKS chunks
-    are above the threshold individually.
+    Passes when:
+      - Mean cosine similarity >= RELEVANCE_THRESHOLD (0.72), AND
+      - At least MIN_QUALITY_CHUNKS (3) chunks individually exceed the threshold.
+    Either condition failing triggers DSR State 2 corrective retrieval.
     """
     if not chunks:
         return RetrievalResult(chunks=[], mean_similarity=0.0, quality_pass=False)
@@ -284,9 +282,9 @@ def _score_retrieval(chunks: list[CorpusChunk]) -> RetrievalResult:
     mean_sim = sum(scores) / len(scores)
     above_threshold = sum(1 for s in scores if s >= RELEVANCE_THRESHOLD)
     quality_pass = (
-        mean_sim >= RELEVANCE_THRESHOLD and above_threshold >= MIN_QUALITY_CHUNKS
+        mean_sim >= RELEVANCE_THRESHOLD
+        and above_threshold >= MIN_QUALITY_CHUNKS
     )
-
     return RetrievalResult(
         chunks=chunks,
         mean_similarity=round(mean_sim, 4),
@@ -303,14 +301,15 @@ async def _reformulate_query(
     low_quality_chunks: list[CorpusChunk],
 ) -> str:
     """
-    Use NIM to produce a more specific, corpus-aligned reformulation
-    of a query that returned poor retrieval results.
+    Use NIM to produce a more specific, corpus-aligned reformulation of a query
+    that returned poor retrieval results in State 1.
+
+    Uses temperature=0.3 (slightly higher than inference) to allow more
+    diverse reformulation vocabulary while staying domain-appropriate.
     """
     client = _get_nim_client()
-    snippets = " | ".join(
-        c.chunk_text[:120] for c in low_quality_chunks[:3]
-    )
-    prompt = REFORMULATION_PROMPT.format(
+    snippets = " | ".join(c.chunk_text[:120] for c in low_quality_chunks[:3])
+    prompt = _REFORMULATION_PROMPT.format(
         query=original_query,
         snippets=snippets,
     )
@@ -320,10 +319,11 @@ async def _reformulate_query(
         temperature=0.3,
         max_tokens=128,
     )
-    reformulated = response.choices[0].message.content.strip()
+    reformulated: str = response.choices[0].message.content.strip()
     logger.info(
-        "DSR corrective reformulation",
-        extra={"original": original_query, "reformulated": reformulated},
+        "dsr_corrective_reformulation | original=%r reformulated=%r",
+        original_query,
+        reformulated,
     )
     return reformulated
 
@@ -335,10 +335,14 @@ async def _corrective_retrieve(
     domain_hint: str | None,
 ) -> tuple[list[CorpusChunk], str]:
     """
-    DSR State 2: reformulate the query, re-embed, search again,
-    and merge with the best State 1 chunks.
+    DSR State 2: reformulate → re-embed → re-search → merge with State 1.
 
-    Returns (merged_chunks, retrieval_state_label).
+    Merge strategy:
+      - Keep top-3 State 1 chunks (best of a weak retrieval is still signal)
+      - Append all State 2 chunks not already present (deduplicate by chunk_id)
+      - Sort merged list by similarity_score descending
+
+    Returns (merged_chunks, retrieval_state_label="corrective").
     """
     reformulated = await _reformulate_query(original_query, state1_chunks)
     corrective_vector = await embed(reformulated)
@@ -346,13 +350,14 @@ async def _corrective_retrieve(
         db, corrective_vector, TOP_K_CORRECTIVE, domain_hint
     )
 
-    # Merge: keep top-3 from State 1 + all State 2 results, deduplicate by chunk_id
     seen: set[str] = set()
     merged: list[CorpusChunk] = []
+
     for chunk in sorted(state1_chunks, key=lambda c: c.similarity_score, reverse=True)[:3]:
         if chunk.chunk_id not in seen:
             seen.add(chunk.chunk_id)
             merged.append(chunk)
+
     for chunk in corrective_chunks:
         if chunk.chunk_id not in seen:
             seen.add(chunk.chunk_id)
@@ -370,9 +375,9 @@ def _format_context(chunks: list[CorpusChunk]) -> str:
     """
     Serialise retrieved chunks into a structured context block for NIM.
 
-    Each chunk is labelled with its source and confidence tier so the model
-    can generate accurate provenance tags in its response.
-    Character budget is capped at MAX_CONTEXT_CHARS.
+    Each chunk is labelled with its source and confidence_tier so the model
+    can generate accurate provenance markers. Total character budget is capped
+    at MAX_CONTEXT_CHARS to stay safely within the NIM context window.
     """
     parts: list[str] = []
     total_chars = 0
@@ -382,10 +387,11 @@ def _format_context(chunks: list[CorpusChunk]) -> str:
             f"[CHUNK {i + 1}] "
             f"Source: {chunk.source} | "
             f"Domain: {chunk.domain} | "
-            f"Confidence: {chunk.confidence_tier}"
+            f"Confidence tier: {chunk.confidence_tier}"
         )
         if chunk.section:
             header += f" | Section: {chunk.section}"
+
         block = f"{header}\n{chunk.chunk_text}"
 
         if total_chars + len(block) > MAX_CONTEXT_CHARS:
@@ -398,62 +404,68 @@ def _format_context(chunks: list[CorpusChunk]) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 5 — Query NIM
+# Step 5 — query()
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def query(prompt: str, context: str) -> str:
     """
-    Send the user query and formatted retrieval context to NIM for inference.
+    Send the engineer's query and formatted retrieval context to NIM.
 
-    Uses Nemotron-4-340B-Instruct at temperature=0.1 (deterministic engineering
-    responses). Returns the raw assistant message content.
+    System prompt: ACTIVE_SYSTEM_PROMPT from app.core.prompts (versioned).
+    Temperature:   settings.NIM_INFERENCE_TEMPERATURE (default 0.1) for
+                   deterministic, reproducible engineering responses.
     """
     client = _get_nim_client()
     response = await client.chat.completions.create(
-        model=settings.NIM_MODEL_ENGINEERING,   # nvidia/nemotron-4-340b-instruct
+        model=settings.NIM_MODEL_ENGINEERING,
         messages=[
-            {"role": "system", "content": ENGINEERING_SYSTEM_PROMPT},
+            {"role": "system", "content": ACTIVE_SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": (
                     f"Retrieved context:\n\n{context}\n\n"
-                    f"────────────────────────────────\n\n"
+                    f"{'─' * 40}\n\n"
                     f"Engineer's query: {prompt}"
                 ),
             },
         ],
-        temperature=0.1,
+        temperature=settings.NIM_INFERENCE_TEMPERATURE,
         max_tokens=1024,
     )
     return response.choices[0].message.content
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 6 — Validate and attach provenance
+# Step 6 — Validate response
 # ─────────────────────────────────────────────────────────────────────────────
 
 _NUMERIC_PATTERN = re.compile(
-    r"\b\d+(?:\.\d+)?(?:\s*[×x]\s*10[⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+)?"  # plain or scientific
-    r"(?:\s*(?:Pa|MPa|GPa|K|°C|W|kW|MW|J|kJ|m|mm|kg|g|s|Hz|kHz|MHz|GHz|"
-    r"rad|deg|N|kN|MN|A|V|Ω|T|F|H|mol|cd|lm|lx|Wb|S|m²|m³|m/s|m/s²))?"
+    r"\b\d+(?:\.\d+)?(?:\s*[×x]\s*10[⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+)?"
+    r"(?:\s*(?:Pa|MPa|GPa|K|°C|W|kW|MW|J|kJ|m|mm|μm|nm|"
+    r"kg|g|s|ms|Hz|kHz|MHz|GHz|rad|deg|N|kN|MN|"
+    r"A|V|Ω|T|F|H|mol|cd|lm|lx|Wb|S|m²|m³|m/s|m/s²|"
+    r"eV|dB|dBm|psi|bar|atm))?"
     r"\b"
 )
 
 
 def _validate_response(answer: str) -> list[str]:
     """
-    Check the NIM response for numeric claims that lack provenance tags.
+    Scan the NIM answer for numeric claims lacking provenance markers.
 
-    Returns a list of untagged numeric strings that may need manual review.
-    This does not block the response — it populates a warning field used
-    by the API layer for logging and QA.
+    Recognises the two canonical markers defined in ACTIVE_SYSTEM_PROMPT_V1:
+      - "[Retrieved from: ..."
+      - "[Model estimate, confidence: moderate — verify before use]"
+
+    A number is considered tagged if either marker appears within 200 chars
+    of it. Untagged values are logged as warnings — they do NOT block delivery.
+
+    Returns a deduplicated list of untagged numeric strings.
     """
     numbers_found = _NUMERIC_PATTERN.findall(answer)
     untagged: list[str] = []
 
     for number in numbers_found:
-        # A number is "tagged" if "retrieved from" or "model estimate" appears
-        # within ~200 chars of it in the answer text
         idx = answer.find(number)
         window = answer[max(0, idx - 200): idx + 200].lower()
         if "retrieved from" not in window and "model estimate" not in window:
@@ -462,57 +474,12 @@ def _validate_response(answer: str) -> list[str]:
     return list(set(untagged))
 
 
-def _build_provenance(
-    answer: str,
-    chunks: list[CorpusChunk],
-) -> list[ProvenanceTag]:
-    """
-    Build a structured provenance list by correlating chunk source mentions
-    in the answer text with the retrieved corpus chunks.
-
-    Each ProvenanceTag links a claim position in the answer to its source chunk.
-    """
-    provenance: list[ProvenanceTag] = []
-    claim_index = 0
-
-    for chunk in chunks:
-        # Look for explicit mentions of the source in the answer
-        source_lower = chunk.source.lower()
-        answer_lower = answer.lower()
-
-        if source_lower in answer_lower or f"chunk {chunks.index(chunk) + 1}" in answer_lower:
-            confidence = _tier_to_confidence(chunk.confidence_tier, chunk.similarity_score)
-            provenance.append(
-                ProvenanceTag(
-                    claim_index=claim_index,
-                    source=chunk.source,
-                    confidence=confidence,
-                    chunk_id=chunk.chunk_id,
-                    similarity_score=chunk.similarity_score,
-                )
-            )
-            claim_index += 1
-
-    # If no explicit source mentions found, still tag the top-3 chunks
-    # as implicit provenance so the caller always has audit trail
-    if not provenance:
-        for i, chunk in enumerate(chunks[:3]):
-            confidence = _tier_to_confidence(chunk.confidence_tier, chunk.similarity_score)
-            provenance.append(
-                ProvenanceTag(
-                    claim_index=i,
-                    source=chunk.source,
-                    confidence=confidence,
-                    chunk_id=chunk.chunk_id,
-                    similarity_score=chunk.similarity_score,
-                )
-            )
-
-    return provenance
-
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 7 — Build provenance
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _tier_to_confidence(tier: str, similarity: float) -> str:
-    """Map confidence_tier + similarity score to a human-readable confidence label."""
+    """Map confidence_tier + similarity score to a human-readable label."""
     if tier == "authoritative" and similarity >= 0.85:
         return "high"
     if tier == "authoritative" and similarity >= RELEVANCE_THRESHOLD:
@@ -524,8 +491,61 @@ def _tier_to_confidence(tier: str, similarity: float) -> str:
     return "low"
 
 
+def _build_provenance(
+    answer: str,
+    chunks: list[CorpusChunk],
+) -> list[ProvenanceTag]:
+    """
+    Build a structured provenance list correlating source mentions in the
+    answer text with their retrieved corpus chunks.
+
+    Primary: look for explicit source name or chunk label in the answer.
+    Fallback: tag top-3 chunks as implicit provenance so the caller always
+    has a complete audit trail even when the model didn't surface source
+    names directly in its text.
+    """
+    provenance: list[ProvenanceTag] = []
+    claim_index = 0
+    answer_lower = answer.lower()
+
+    for i, chunk in enumerate(chunks):
+        if (
+            chunk.source.lower() in answer_lower
+            or f"chunk {i + 1}" in answer_lower
+        ):
+            provenance.append(
+                ProvenanceTag(
+                    claim_index=claim_index,
+                    source=chunk.source,
+                    confidence=_tier_to_confidence(
+                        chunk.confidence_tier, chunk.similarity_score
+                    ),
+                    chunk_id=chunk.chunk_id,
+                    similarity_score=chunk.similarity_score,
+                )
+            )
+            claim_index += 1
+
+    # Fallback: ensure top-3 chunks are always in the audit trail
+    if not provenance:
+        for i, chunk in enumerate(chunks[:3]):
+            provenance.append(
+                ProvenanceTag(
+                    claim_index=i,
+                    source=chunk.source,
+                    confidence=_tier_to_confidence(
+                        chunk.confidence_tier, chunk.similarity_score
+                    ),
+                    chunk_id=chunk.chunk_id,
+                    similarity_score=chunk.similarity_score,
+                )
+            )
+
+    return provenance
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Main pipeline — run_assistant
+# Main entry point — run_assistant()
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def run_assistant(
@@ -535,28 +555,32 @@ async def run_assistant(
     """
     Execute the full DSR-CRAG pipeline for a single assistant turn.
 
-    Stages:
-      1. Embed query                      → query_vector
-      2. State 1: primary vector search   → state1_result
-      3. Quality gate
-         pass  → proceed with state1_result.chunks
-         fail  → State 2: corrective re-retrieval → merged_chunks
-      4. Format context
-      5. Query NIM                        → raw_answer
-      6. Validate response
-      7. Build provenance tags
+    Pipeline:
+      1. embed(query)                      → query_vector
+      2. State 1: _vector_search()         → state1_chunks
+      3. _score_retrieval()                → quality gate
+         pass  → use state1_chunks
+         fail  → _corrective_retrieve()   → merged_chunks
+      4. _format_context(chunks)           → context string
+      5. query(prompt, context)            → raw_answer
+      6. _validate_response(answer)        → untagged_numerics (warnings only)
+      7. _build_provenance(answer, chunks) → provenance list
       8. Return AssistantResponse
+
+    Args:
+        request: AssistantRequest with query and optional project/domain scope.
+        db:      AsyncIOMotorDatabase injected by FastAPI dependency.
+
+    Returns:
+        AssistantResponse with answer, provenance, and retrieval metadata.
     """
-    import time
     t_start = time.perf_counter()
 
     logger.info(
-        "assistant_pipeline_start",
-        extra={
-            "conversation_id": request.conversation_id,
-            "turn_id": request.turn_id,
-            "query_length": len(request.query),
-        },
+        "assistant_pipeline_start | conversation=%s turn=%s query_len=%d",
+        request.conversation_id,
+        request.turn_id,
+        len(request.query),
     )
 
     # ── 1. Embed ──────────────────────────────────────────────────────────────
@@ -569,43 +593,49 @@ async def run_assistant(
     state1_result = _score_retrieval(state1_chunks)
 
     logger.info(
-        "state1_retrieval",
-        extra={
-            "chunks": len(state1_chunks),
-            "mean_similarity": state1_result.mean_similarity,
-            "quality_pass": state1_result.quality_pass,
-        },
+        "state1_retrieval | chunks=%d mean_sim=%.4f quality_pass=%s",
+        len(state1_chunks),
+        state1_result.mean_similarity,
+        state1_result.quality_pass,
     )
 
-    # ── 3. Quality gate → State 2 if needed ───────────────────────────────────
+    # ── 3. Quality gate ───────────────────────────────────────────────────────
     retrieval_state: str
     final_chunks: list[CorpusChunk]
 
     if state1_result.quality_pass:
         final_chunks = state1_result.chunks
         retrieval_state = "primary"
+
     elif not state1_chunks:
-        # No results at all — fallback to generation-only with explicit warning
+        # Corpus empty or query completely out-of-domain — generation fallback
         final_chunks = []
         retrieval_state = "fallback"
         logger.warning(
-            "empty_retrieval_fallback",
-            extra={"conversation_id": request.conversation_id},
+            "empty_retrieval_fallback | conversation=%s",
+            request.conversation_id,
         )
+
     else:
+        # DSR State 2: corrective re-retrieval
         final_chunks, retrieval_state = await _corrective_retrieve(
             db, request.query, state1_chunks, request.domain_hint
         )
         logger.info(
-            "state2_corrective_retrieval",
-            extra={"final_chunks": len(final_chunks)},
+            "state2_corrective_complete | merged_chunks=%d",
+            len(final_chunks),
         )
 
     # ── 4. Format context ─────────────────────────────────────────────────────
-    context = _format_context(final_chunks) if final_chunks else (
-        "No relevant corpus chunks retrieved. Answer from model knowledge only. "
-        "All numeric values must be tagged as 'model estimate — verify before use'."
-    )
+    if final_chunks:
+        context = _format_context(final_chunks)
+    else:
+        context = (
+            "No relevant corpus chunks retrieved. "
+            "Answer from model knowledge only. "
+            "All numeric values must be tagged as "
+            "'[Model estimate, confidence: moderate — verify before use]'."
+        )
 
     # ── 5. Query NIM ──────────────────────────────────────────────────────────
     raw_answer = await query(request.query, context)
@@ -614,28 +644,24 @@ async def run_assistant(
     untagged_numerics = _validate_response(raw_answer)
     if untagged_numerics:
         logger.warning(
-            "untagged_numeric_claims_detected",
-            extra={
-                "turn_id": request.turn_id,
-                "untagged": untagged_numerics,
-            },
+            "untagged_numeric_claims | turn=%s count=%d values=%s",
+            request.turn_id,
+            len(untagged_numerics),
+            untagged_numerics,
         )
 
     # ── 7. Build provenance ───────────────────────────────────────────────────
     provenance = _build_provenance(raw_answer, final_chunks)
 
-    # ── 8. Assemble response ──────────────────────────────────────────────────
+    # ── 8. Assemble and return ────────────────────────────────────────────────
     latency_ms = (time.perf_counter() - t_start) * 1000
 
     logger.info(
-        "assistant_pipeline_complete",
-        extra={
-            "turn_id": request.turn_id,
-            "retrieval_state": retrieval_state,
-            "chunks_used": len(final_chunks),
-            "latency_ms": round(latency_ms, 1),
-            "untagged_numerics": len(untagged_numerics),
-        },
+        "assistant_pipeline_complete | turn=%s state=%s chunks=%d latency_ms=%.1f",
+        request.turn_id,
+        retrieval_state,
+        len(final_chunks),
+        latency_ms,
     )
 
     return AssistantResponse(
@@ -646,6 +672,7 @@ async def run_assistant(
         retrieval_state=retrieval_state,
         chunks_used=len(final_chunks),
         model=settings.NIM_MODEL_ENGINEERING,
+        prompt_version=ACTIVE_PROMPT_VERSION,
         latency_ms=round(latency_ms, 1),
     )
 
